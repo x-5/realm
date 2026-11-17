@@ -15,6 +15,9 @@ on:
       - master
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -68,7 +71,8 @@ jobs:
         run: |
           mkdir -p target/dist
           cp target/release/realm-panel target/dist/realm-panel-linux-x86_64
-          sha256sum target/dist/realm-panel-linux-x86_64 > target/dist/realm-panel-linux-x86_64.sha256
+          tar -C target/dist -zcf target/dist/realm-panel-linux-x86_64.tar.gz realm-panel-linux-x86_64
+          (cd target/dist && sha256sum realm-panel-linux-x86_64 realm-panel-linux-x86_64.tar.gz > realm-panel-linux-x86_64.sha256)
 
       - name: Upload realm-panel artifact
         uses: actions/upload-artifact@v4
@@ -94,3 +98,47 @@ jobs:
           RUSTUP_TOOLCHAIN: stable
           RUSTC_BOOTSTRAP: "1"
         run: cargo test --workspace
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [realm-panel, upstream-realm]
+    if: |
+      github.event_name != 'pull_request' &&
+      (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/feat/realm-panel' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download realm-panel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: realm-panel-linux-x86_64
+          path: release-assets
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: |
+            release-assets/realm-panel-linux-x86_64
+            release-assets/realm-panel-linux-x86_64.tar.gz
+            release-assets/realm-panel-linux-x86_64.sha256
+
+      - name: Publish dev-latest prerelease
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: dev-latest
+          target_commitish: ${{ github.sha }}
+          name: "Realm Panel Dev Build (feat/realm-panel)"
+          prerelease: true
+          make_latest: false
+          body: |
+            Automated build from commit `${{ github.sha }}` on `${{ github.ref_name }}`.
+            Download `realm-panel-linux-x86_64.tar.gz` (single binary with embedded Web UI).
+          files: |
+            release-assets/realm-panel-linux-x86_64
+            release-assets/realm-panel-linux-x86_64.tar.gz
+            release-assets/realm-panel-linux-x86_64.sha256

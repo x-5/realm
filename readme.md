@@ -1,4 +1,14 @@
-# Realm
+# Realm (`feat/realm-panel`)
+
+> [!NOTE]
+> 当前分支 `feat/realm-panel` 在**不改动上游 `realm` 原有源码**的前提下，在独立子目录 [`realm_panel/`](realm_panel/README.md) 中新增了 Web 管理面板、稳定差量热重载（修改/禁用/删除规则强制断连）、双向流量统计（7天/30天）、实时入口设备与速度监控、性能开销统计、目的端口可达性探测及可观测日志，并集成了 GitHub Actions 自动编译与 Release 发布（[realm-panel-ci.yml](.github/workflows/realm-panel-ci.yml)）。
+>
+> - 详细功能与使用说明请查看：**[realm_panel/README.md](realm_panel/README.md)**
+> - 二进制产物请在仓库 **[Releases](../../releases)**（或 Actions Run 页面的 Artifacts）下载 `realm-panel-linux-x86_64.tar.gz`。
+
+---
+
+## Upstream Realm
 
 A simple, high performance relay server written in rust.
 
