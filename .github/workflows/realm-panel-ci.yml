@@ -1,0 +1,96 @@
+name: realm-panel CI
+
+on:
+  push:
+    branches:
+      - feat/realm-panel
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - feat/realm-panel
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  realm-panel:
+    name: Build & Test realm_panel (x86_64-linux)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: realm_panel
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: realm_panel/frontend/package-lock.json
+
+      - name: Build frontend assets
+        working-directory: realm_panel/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: realm_panel
+
+      - name: Check & Test realm_panel
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: |
+          cargo check --tests
+          cargo test
+
+      - name: Build release binary
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: cargo build --release
+
+      - name: Package release binary
+        run: |
+          mkdir -p target/dist
+          cp target/release/realm-panel target/dist/realm-panel-linux-x86_64
+          sha256sum target/dist/realm-panel-linux-x86_64 > target/dist/realm-panel-linux-x86_64.sha256
+
+      - name: Upload realm-panel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: realm-panel-linux-x86_64
+          path: realm_panel/target/dist/*
+
+  upstream-realm:
+    name: Verify Upstream realm Workspace
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run upstream workspace tests
+        env:
+          RUSTUP_TOOLCHAIN: stable
+          RUSTC_BOOTSTRAP: "1"
+        run: cargo test --workspace
