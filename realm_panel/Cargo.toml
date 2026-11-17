@@ -1,0 +1,77 @@
+[workspace]
+
+[package]
+name = "realm_panel"
+version = "0.1.0"
+edition = "2021"
+description = "Extended management panel, hot-reload, observability, probing, and live device/traffic analytics built on top of realm libraries."
+license = "MIT"
+
+[[bin]]
+name = "realm-panel"
+path = "src/main.rs"
+
+[dependencies]
+# Upstream realm crates via path dependencies (zero modifications to upstream)
+realm = { path = ".." }
+realm_core = { path = "../realm_core", features = ["proxy", "balance", "multi-thread", "transport", "transport-boost", "transport-tls-awslc", "batched-udp", "brutal-shutdown", "hook"] }
+realm_io = { path = "../realm_io", features = ["brutal-shutdown", "statistic", "peek"] }
+realm_syscall = { path = "../realm_syscall" }
+realm_lb = { path = "../realm_lb" }
+realm_hook = { path = "../realm_hook" }
+
+# Reused core networking dependencies
+hickory-resolver = "0.26"
+proxy-protocol = "0.5"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt", "net"] }
+futures = "0.3"
+bytes = "1"
+libc = "0.2"
+pin-project = "1"
+
+# CLI & Config
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+notify = "7"
+arc-swap = "1"
+anyhow = "1"
+
+# Web Server & Embedded UI
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+rust-embed = "8"
+mime_guess = "2"
+
+# Storage & Crypto / Auth
+rusqlite = { version = "0.32", features = ["bundled"] }
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"
+
+# Observability & Performance
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
+tracing-log = "0.2"
+log = "0.4"
+sysinfo = "0.33"
+
+[dev-dependencies]
+tokio-tungstenite = "0.26"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3"
+
+[patch.crates-io]
+realm_io = { path = "../realm_io" }
+realm_syscall = { path = "../realm_syscall" }
+realm_lb = { path = "../realm_lb" }
+realm_hook = { path = "../realm_hook" }
