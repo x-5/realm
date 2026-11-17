@@ -107,6 +107,9 @@ export function App() {
       if (closed) return;
       ws = new WebSocket(createWsUrl('/ws/realtime'));
       ws.onopen = () => setWsConnected(true);
+      ws.onerror = () => {
+        ws?.close();
+      };
       ws.onclose = () => {
         setWsConnected(false);
         if (!closed) {
@@ -119,7 +122,12 @@ export function App() {
           if (msg.type === 'realtime' && msg.snapshot) {
             const snap: RealtimeSnapshot = msg.snapshot;
             setLatest(snap);
-            setRecentRealtime((prev) => [...prev.slice(-119), snap]);
+            setRecentRealtime((prev) => {
+              if (prev.length > 0 && prev[prev.length - 1].ts === snap.ts) {
+                return [...prev.slice(0, -1), snap];
+              }
+              return [...prev.slice(-119), snap];
+            });
             if (msg.probes) setProbes(msg.probes);
           }
         } catch {
@@ -129,12 +137,34 @@ export function App() {
     };
 
     connect();
+    const epTimer = setInterval(() => {
+      refreshEndpoints();
+    }, 5000);
+
     return () => {
       closed = true;
       if (retryTimer) clearTimeout(retryTimer);
+      clearInterval(epTimer);
       ws?.close();
     };
   }, [authed, refreshEndpoints]);
+
+  // Fallback polling when WebSocket is disconnected so metrics/KPIs still refresh
+  useEffect(() => {
+    if (!authed || wsConnected) return;
+    const poll = () => {
+      api
+        .statsOverview()
+        .then((res) => {
+          if (res.latest) setLatest(res.latest);
+          if (res.recent) setRecentRealtime(res.recent);
+          if (res.probes) setProbes(res.probes);
+        })
+        .catch(() => {});
+    };
+    const timer = setInterval(poll, 2000);
+    return () => clearInterval(timer);
+  }, [authed, wsConnected]);
 
   if (!authed) {
     return (
@@ -209,7 +239,7 @@ export function App() {
   const navItems: { key: TabKey; label: string; icon: React.ReactNode }[] = [
     { key: 'overview', label: '实时总览', icon: <LayoutDashboard className="h-4 w-4" /> },
     { key: 'endpoints', label: '转发规则与设备', icon: <Network className="h-4 w-4" /> },
-    { key: 'traffic', label: '流量统计 (7d/30d)', icon: <Activity className="h-4 w-4" /> },
+    { key: 'traffic', label: '流量统计', icon: <Activity className="h-4 w-4" /> },
     { key: 'performance', label: '性能开销', icon: <Cpu className="h-4 w-4" /> },
     { key: 'probes', label: '端口探活', icon: <HeartPulse className="h-4 w-4" /> },
     { key: 'logs', label: '可观测日志', icon: <ScrollText className="h-4 w-4" /> },
@@ -353,7 +383,13 @@ export function App() {
                       key={ep.id}
                       className="rounded-xl border border-slate-800 bg-slate-900/70 transition hover:border-slate-700"
                     >
-                      <div className="flex flex-wrap items-center justify-between gap-4 p-4">
+                      <div
+                        onClick={() =>
+                          setExpandedEpIds((prev) => ({ ...prev, [ep.id]: !prev[ep.id] }))
+                        }
+                        className="flex cursor-pointer flex-wrap items-center justify-between gap-4 p-4 select-none"
+                        title="点击展开/收起规则详情与接入客户端"
+                      >
                         <div className="min-w-[240px] flex-1">
                           <div className="flex items-center gap-2.5">
                             <span
@@ -441,7 +477,10 @@ export function App() {
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-1.5">
+                        <div
+                          className="flex items-center gap-1.5"
+                          onClick={(e) => e.stopPropagation()}
+                        >
                           <button
                             onClick={() =>
                               setExpandedEpIds((prev) => ({ ...prev, [ep.id]: !prev[ep.id] }))
@@ -453,7 +492,7 @@ export function App() {
                             ) : (
                               <ChevronRight className="h-3.5 w-3.5" />
                             )}
-                            接入设备 ({epDevs.length})
+                            详情 / 客户端 ({epDevs.length})
                           </button>
                           <button
                             onClick={() => handleToggle(ep)}
@@ -487,7 +526,116 @@ export function App() {
                       </div>
 
                       {expanded && (
-                        <div className="border-t border-slate-800 bg-slate-950/40 p-3">
+                        <div className="space-y-4 border-t border-slate-800 bg-slate-950/50 p-4">
+                          {/* Rule configuration & runtime details */}
+                          <div className="grid grid-cols-1 gap-3 rounded-xl border border-slate-800/90 bg-slate-900/60 p-3.5 text-xs md:grid-cols-2 xl:grid-cols-4">
+                            <div>
+                              <div className="text-slate-500">规则 ID / 状态</div>
+                              <div className="mt-1 font-mono text-slate-200">
+                                {ep.id}{' '}
+                                <span
+                                  className={`ml-1 rounded px-1.5 py-0.5 text-[10px] ${
+                                    !ep.enabled
+                                      ? 'bg-slate-800 text-slate-400'
+                                      : ep.running
+                                        ? 'bg-emerald-500/15 text-emerald-300'
+                                        : 'bg-rose-500/15 text-rose-300'
+                                  }`}
+                                >
+                                  {!ep.enabled ? '已停用' : ep.running ? '运行中' : '未就绪'}
+                                </span>
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-slate-500">监听与目标地址</div>
+                              <div className="mt-1 font-mono text-slate-200 break-all">
+                                <span className="text-cyan-300">{ep.listen}</span> → {ep.remote}
+                              </div>
+                              {ep.extra_remotes && ep.extra_remotes.length > 0 && (
+                                <div className="mt-0.5 font-mono text-[11px] text-slate-400 break-all">
+                                  备选节点: {ep.extra_remotes.join(', ')}
+                                </div>
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-slate-500">均衡 / 传输层 / 接口绑定</div>
+                              <div className="mt-1 font-mono text-slate-300">
+                                LB: {ep.balance || '默认'} · L:{ep.listen_transport || 'raw'} · R:{ep.remote_transport || 'raw'}
+                              </div>
+                              {(ep.through || ep.interface || ep.listen_interface) && (
+                                <div className="mt-0.5 font-mono text-[11px] text-slate-400">
+                                  through={ep.through || '-'} if={ep.interface || '-'} lif={ep.listen_interface || '-'}
+                                </div>
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-slate-500">网络参数与连接累计</div>
+                              <div className="mt-1 font-mono text-slate-300">
+                                TCP超时 {ep.network?.tcp_timeout ?? '-'}s · UDP超时 {ep.network?.udp_timeout ?? '-'}s
+                                {ep.network?.send_proxy ? ' · SendPROXY' : ''}
+                                {ep.network?.accept_proxy ? ' · AcceptPROXY' : ''}
+                              </div>
+                              <div className="mt-0.5 font-mono text-[11px] text-slate-400">
+                                累计TCP {live?.total_tcp_conns ?? ep.total_tcp_conns} · 零拷贝 {live?.zero_copy_conns ?? ep.zero_copy_conns} · 失败 {live?.connect_errors ?? ep.connect_errors}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Target reachability probe summary */}
+                          <div className="rounded-xl border border-slate-800/90 bg-slate-900/60 p-3.5 text-xs">
+                            <div className="mb-2 flex items-center justify-between">
+                              <span className="font-semibold text-slate-200">
+                                目的端口可达性检测（{ep.probe_enabled ? `周期 ${ep.probe_interval_sec}s / 超时 ${ep.probe_timeout_ms}ms` : '已关闭'}）
+                              </span>
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await api.runProbeNow(ep.id);
+                                    setProbes(await api.listProbes());
+                                    notify('探活已完成');
+                                  } catch (err) {
+                                    notify(err instanceof Error ? err.message : '探活失败', false);
+                                  }
+                                }}
+                                className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1 text-slate-200 hover:bg-slate-800"
+                              >
+                                立即探测
+                              </button>
+                            </div>
+                            {epProbes.length === 0 ? (
+                              <div className="text-slate-500">暂无该规则的探活数据</div>
+                            ) : (
+                              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                                {epProbes.map((p) => (
+                                  <div
+                                    key={`${p.endpoint_id}-${p.target}`}
+                                    className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 font-mono"
+                                  >
+                                    <div>
+                                      <div className="text-slate-200">
+                                        {p.target} ({p.protocol.toUpperCase()})
+                                      </div>
+                                      <div className="text-[11px] text-slate-500">
+                                        IP: {p.resolved_ip || '-'} · 检查于 {formatTime(p.last_checked_ts, true)}
+                                        {p.error_msg ? ` · ${p.error_msg}` : ''}
+                                      </div>
+                                    </div>
+                                    <span
+                                      className={`rounded-full px-2 py-0.5 text-[11px] ${
+                                        p.reachable
+                                          ? 'bg-emerald-500/15 text-emerald-300'
+                                          : 'bg-rose-500/15 text-rose-300'
+                                      }`}
+                                    >
+                                      {p.reachable ? `可达 ${p.rtt_ms ?? '-'}ms` : `不可达 (${p.consecutive_failures})`}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Connected entry clients */}
                           <LiveDevicesTable devices={epDevs} />
                         </div>
                       )}
@@ -551,6 +699,7 @@ function OverviewView({
     const rx = recent.map((r) => r.total_rx_bps);
     const tx = recent.map((r) => r.total_tx_bps);
     return {
+      animation: false,
       backgroundColor: 'transparent',
       tooltip: {
         trigger: 'axis',
@@ -564,15 +713,19 @@ function OverviewView({
         },
       },
       legend: { data: ['入站速率 (RX)', '出站速率 (TX)'], textStyle: { color: '#94a3b8' }, top: 0 },
-      grid: { left: 60, right: 20, top: 36, bottom: 26 },
+      grid: { left: 16, right: 16, top: 38, bottom: 14, containLabel: true },
       xAxis: {
         type: 'category',
+        boundaryGap: false,
         data: times,
         axisLine: { lineStyle: { color: '#334155' } },
         axisLabel: { color: '#64748b', fontSize: 11 },
       },
       yAxis: {
         type: 'value',
+        min: 0,
+        minInterval: 1,
+        splitNumber: 4,
         splitLine: { lineStyle: { color: '#1e293b' } },
         axisLabel: { color: '#64748b', fontSize: 11, formatter: (v: number) => formatBps(v) },
       },
@@ -580,20 +733,24 @@ function OverviewView({
         {
           name: '入站速率 (RX)',
           type: 'line',
-          smooth: true,
-          showSymbol: false,
+          smooth: false,
+          showSymbol: recent.length <= 20,
+          symbolSize: 4,
           data: rx,
+          itemStyle: { color: '#22d3ee' },
           lineStyle: { color: '#22d3ee', width: 2 },
-          areaStyle: { color: 'rgba(34,211,238,0.12)' },
+          areaStyle: { color: 'rgba(34,211,238,0.10)' },
         },
         {
           name: '出站速率 (TX)',
           type: 'line',
-          smooth: true,
-          showSymbol: false,
+          smooth: false,
+          showSymbol: recent.length <= 20,
+          symbolSize: 4,
           data: tx,
+          itemStyle: { color: '#34d399' },
           lineStyle: { color: '#34d399', width: 2 },
-          areaStyle: { color: 'rgba(52,211,153,0.12)' },
+          areaStyle: { color: 'rgba(52,211,153,0.10)' },
         },
       ],
     };
@@ -694,31 +851,96 @@ function OverviewView({
   );
 }
 
+function formatDateInput(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 function TrafficView({ endpoints }: { endpoints: EndpointView[] }) {
-  const [range, setRange] = useState<'1h' | '24h' | '7d' | '30d'>('7d');
+  type TrafficMode = '1h' | '24h' | '7d' | '30d' | 'custom';
+  const [mode, setMode] = useState<TrafficMode>('7d');
+  const [startDate, setStartDate] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 6);
+    return formatDateInput(d);
+  });
+  const [endDate, setEndDate] = useState<string>(() => formatDateInput(new Date()));
+  const [appliedDates, setAppliedDates] = useState<{ start: string; end: string }>({
+    start: startDate,
+    end: endDate,
+  });
+  const [dateError, setDateError] = useState('');
   const [endpointId, setEndpointId] = useState('');
   const [unit, setUnit] = useState<'bps' | 'bytes'>('bytes');
   const [series, setSeries] = useState<TrafficPoint[]>([]);
   const [byEndpoint, setByEndpoint] = useState<EndpointTrafficSummary[]>([]);
 
-  useEffect(() => {
+  const loadTraffic = useCallback(() => {
+    if (mode === 'custom') {
+      const fromSec = Math.floor(new Date(`${appliedDates.start}T00:00:00`).getTime() / 1000);
+      const toSec = Math.floor(new Date(`${appliedDates.end}T23:59:59`).getTime() / 1000);
+      if (!Number.isFinite(fromSec) || !Number.isFinite(toSec) || fromSec > toSec) {
+        return;
+      }
+      api
+        .statsTraffic({
+          from: fromSec,
+          to: toSec,
+          endpointId: endpointId || undefined,
+        })
+        .then((res) => {
+          setUnit(res.unit);
+          setSeries(res.series);
+          setByEndpoint(res.by_endpoint);
+        })
+        .catch(() => {});
+      return;
+    }
+
     api
-      .statsTraffic(range, endpointId || undefined)
+      .statsTraffic({
+        range: mode,
+        endpointId: endpointId || undefined,
+      })
       .then((res) => {
         setUnit(res.unit);
         setSeries(res.series);
         setByEndpoint(res.by_endpoint);
       })
       .catch(() => {});
-  }, [range, endpointId]);
+  }, [mode, appliedDates, endpointId]);
+
+  useEffect(() => {
+    loadTraffic();
+    const timer = setInterval(loadTraffic, mode === '1h' ? 10000 : 30000);
+    return () => clearInterval(timer);
+  }, [loadTraffic, mode]);
+
+  const applyCustomDates = () => {
+    if (!startDate || !endDate) {
+      setDateError('请选择完整的起止日期');
+      return;
+    }
+    if (startDate > endDate) {
+      setDateError('开始日期不能晚于结束日期');
+      return;
+    }
+    setDateError('');
+    setAppliedDates({ start: startDate, end: endDate });
+    setMode('custom');
+  };
 
   const epName = new Map(endpoints.map((e) => [e.id, `${e.name} (${e.listen})`]));
   const totalRx = series.reduce((a, b) => a + b.rx_bytes, 0);
   const totalTx = series.reduce((a, b) => a + b.tx_bytes, 0);
 
   const chartOption: echarts.EChartsOption = useMemo(() => {
-    const labels = series.map((p) => formatTime(p.ts, range === '7d' || range === '30d' || range === '24h'));
+    const isLine = unit === 'bps';
+    const labels = series.map((p) => formatTime(p.ts, mode !== '1h'));
     return {
+      animation: false,
       backgroundColor: 'transparent',
       tooltip: {
         trigger: 'axis',
@@ -733,15 +955,18 @@ function TrafficView({ endpoints }: { endpoints: EndpointView[] }) {
         },
       },
       legend: { data: ['入站 (RX)', '出站 (TX)'], textStyle: { color: '#94a3b8' }, top: 0 },
-      grid: { left: 65, right: 20, top: 38, bottom: 30 },
+      grid: { left: 16, right: 16, top: 38, bottom: 14, containLabel: true },
       xAxis: {
         type: 'category',
+        boundaryGap: !isLine,
         data: labels,
         axisLine: { lineStyle: { color: '#334155' } },
         axisLabel: { color: '#64748b', fontSize: 11 },
       },
       yAxis: {
         type: 'value',
+        min: 0,
+        minInterval: 1,
         splitLine: { lineStyle: { color: '#1e293b' } },
         axisLabel: {
           color: '#64748b',
@@ -752,32 +977,42 @@ function TrafficView({ endpoints }: { endpoints: EndpointView[] }) {
       series: [
         {
           name: '入站 (RX)',
-          type: range === '1h' ? 'line' : 'bar',
-          smooth: true,
+          type: isLine ? 'line' : 'bar',
+          smooth: false,
           showSymbol: false,
+          barMaxWidth: 28,
           data: series.map((s) => s.rx_bytes),
           itemStyle: { color: '#22d3ee' },
-          lineStyle: { color: '#22d3ee' },
+          lineStyle: { color: '#22d3ee', width: 2 },
         },
         {
           name: '出站 (TX)',
-          type: range === '1h' ? 'line' : 'bar',
-          smooth: true,
+          type: isLine ? 'line' : 'bar',
+          smooth: false,
           showSymbol: false,
+          barMaxWidth: 28,
           data: series.map((s) => s.tx_bytes),
           itemStyle: { color: '#34d399' },
-          lineStyle: { color: '#34d399' },
+          lineStyle: { color: '#34d399', width: 2 },
         },
       ],
     };
-  }, [series, range, unit]);
+  }, [series, mode, unit]);
+
+  const presetItems: { key: TrafficMode; label: string }[] = [
+    { key: '1h', label: '最近 1 小时' },
+    { key: '24h', label: '最近 24 小时' },
+    { key: '7d', label: '最近 7 天' },
+    { key: '30d', label: '最近 30 天' },
+    { key: 'custom', label: '自定义日期' },
+  ];
 
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-lg font-bold text-slate-100">双向流量与历史趋势</h1>
-          <p className="text-xs text-slate-400">支持 1 小时 / 24 小时 / 7 天（分钟粒度）/ 30 天（小时粒度）查询</p>
+          <p className="text-xs text-slate-400">按时间区间、指定日期范围或转发规则查看双向入出流量趋势与排行</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <select
@@ -792,21 +1027,61 @@ function TrafficView({ endpoints }: { endpoints: EndpointView[] }) {
               </option>
             ))}
           </select>
-          <div className="flex rounded-lg border border-slate-700 bg-slate-900 p-0.5 text-xs">
-            {(['1h', '24h', '7d', '30d'] as const).map((r) => (
+          <div className="flex flex-wrap rounded-lg border border-slate-700 bg-slate-900 p-0.5 text-xs">
+            {presetItems.map((item) => (
               <button
-                key={r}
-                onClick={() => setRange(r)}
+                key={item.key}
+                onClick={() => {
+                  setDateError('');
+                  setMode(item.key);
+                }}
                 className={`rounded-md px-3 py-1 font-medium transition ${
-                  range === r ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 hover:text-slate-200'
+                  mode === item.key ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
-                {r}
+                {item.label}
               </button>
             ))}
           </div>
         </div>
       </div>
+
+      {mode === 'custom' && (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-800 bg-slate-900/70 px-4 py-3 text-xs">
+          <span className="font-medium text-slate-300">选择日期区间:</span>
+          <label className="flex items-center gap-2 text-slate-400">
+            <span>开始</span>
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-slate-100 focus:border-cyan-500 focus:outline-none"
+            />
+          </label>
+          <span className="text-slate-500">至</span>
+          <label className="flex items-center gap-2 text-slate-400">
+            <span>结束</span>
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-slate-100 focus:border-cyan-500 focus:outline-none"
+            />
+          </label>
+          <button
+            onClick={applyCustomDates}
+            className="rounded-lg bg-cyan-500 px-3.5 py-1.5 font-semibold text-slate-950 hover:bg-cyan-400"
+          >
+            查询区间
+          </button>
+          {dateError && <span className="text-rose-400">{dateError}</span>}
+          {!dateError && (
+            <span className="text-slate-500">
+              当前统计范围：{appliedDates.start} 00:00:00 ~ {appliedDates.end} 23:59:59
+            </span>
+          )}
+        </div>
+      )}
 
       {unit === 'bytes' && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -872,29 +1147,50 @@ function PerformanceView({ latestPerf }: { latestPerf: PerfSample | null }) {
   const [latest, setLatest] = useState<PerfSample | null>(latestPerf);
 
   useEffect(() => {
-    api
-      .statsPerformance(range)
-      .then((res) => {
-        setSeries(res.series);
-        if (res.latest) setLatest(res.latest);
-      })
-      .catch(() => {});
+    const fetchPerf = () => {
+      api
+        .statsPerformance(range)
+        .then((res) => {
+          setSeries(res.series);
+          if (res.latest) setLatest(res.latest);
+        })
+        .catch(() => {});
+    };
+    fetchPerf();
+    if (range !== '1h') {
+      const timer = setInterval(fetchPerf, 30000);
+      return () => clearInterval(timer);
+    }
   }, [range]);
+
+  // Append live 1s performance samples in real time when viewing recent 1h
+  useEffect(() => {
+    if (!latestPerf) return;
+    setLatest(latestPerf);
+    if (range !== '1h') return;
+    setSeries((prev) => {
+      if (prev.length > 0 && prev[prev.length - 1].ts === latestPerf.ts) {
+        return [...prev.slice(0, -1), latestPerf];
+      }
+      return [...prev.slice(-599), latestPerf];
+    });
+  }, [latestPerf, range]);
 
   const activeLatest = latestPerf ?? latest;
 
   const cpuChart: echarts.EChartsOption = useMemo(() => {
     const times = series.map((s) => formatTime(s.ts, range !== '1h'));
     return {
+      animation: false,
       backgroundColor: 'transparent',
       tooltip: { trigger: 'axis', backgroundColor: '#0f172a', borderColor: '#334155', textStyle: { color: '#e2e8f0' } },
       legend: { data: ['进程 CPU %', '系统总 CPU %'], textStyle: { color: '#94a3b8' }, top: 0 },
-      grid: { left: 50, right: 20, top: 36, bottom: 26 },
-      xAxis: { type: 'category', data: times, axisLabel: { color: '#64748b', fontSize: 11 } },
-      yAxis: { type: 'value', splitLine: { lineStyle: { color: '#1e293b' } }, axisLabel: { color: '#64748b', formatter: '{value}%' } },
+      grid: { left: 16, right: 16, top: 36, bottom: 14, containLabel: true },
+      xAxis: { type: 'category', boundaryGap: false, data: times, axisLabel: { color: '#64748b', fontSize: 11 } },
+      yAxis: { type: 'value', min: 0, splitLine: { lineStyle: { color: '#1e293b' } }, axisLabel: { color: '#64748b', formatter: '{value}%' } },
       series: [
-        { name: '进程 CPU %', type: 'line', smooth: true, showSymbol: false, data: series.map((s) => Number(s.proc_cpu_pct.toFixed(2))), lineStyle: { color: '#22d3ee' } },
-        { name: '系统总 CPU %', type: 'line', smooth: true, showSymbol: false, data: series.map((s) => Number(s.sys_cpu_pct.toFixed(2))), lineStyle: { color: '#f59e0b' } },
+        { name: '进程 CPU %', type: 'line', smooth: false, showSymbol: false, data: series.map((s) => Number(s.proc_cpu_pct.toFixed(2))), itemStyle: { color: '#22d3ee' }, lineStyle: { color: '#22d3ee', width: 2 } },
+        { name: '系统总 CPU %', type: 'line', smooth: false, showSymbol: false, data: series.map((s) => Number(s.sys_cpu_pct.toFixed(2))), itemStyle: { color: '#f59e0b' }, lineStyle: { color: '#f59e0b', width: 2 } },
       ],
     };
   }, [series, range]);
@@ -902,37 +1198,44 @@ function PerformanceView({ latestPerf }: { latestPerf: PerfSample | null }) {
   const memChart: echarts.EChartsOption = useMemo(() => {
     const times = series.map((s) => formatTime(s.ts, range !== '1h'));
     return {
+      animation: false,
       backgroundColor: 'transparent',
       tooltip: { trigger: 'axis', backgroundColor: '#0f172a', borderColor: '#334155', textStyle: { color: '#e2e8f0' } },
       legend: { data: ['RSS 物理内存 (MB)', '活跃 Tokio 任务'], textStyle: { color: '#94a3b8' }, top: 0 },
-      grid: { left: 55, right: 50, top: 36, bottom: 26 },
-      xAxis: { type: 'category', data: times, axisLabel: { color: '#64748b', fontSize: 11 } },
+      grid: { left: 16, right: 16, top: 36, bottom: 14, containLabel: true },
+      xAxis: { type: 'category', boundaryGap: false, data: times, axisLabel: { color: '#64748b', fontSize: 11 } },
       yAxis: [
-        { type: 'value', splitLine: { lineStyle: { color: '#1e293b' } }, axisLabel: { color: '#64748b', formatter: '{value} MB' } },
-        { type: 'value', splitLine: { show: false }, axisLabel: { color: '#64748b' } },
+        { type: 'value', min: 0, splitLine: { lineStyle: { color: '#1e293b' } }, axisLabel: { color: '#64748b', formatter: '{value} MB' } },
+        { type: 'value', min: 0, minInterval: 1, splitLine: { show: false }, axisLabel: { color: '#64748b' } },
       ],
       series: [
-        { name: 'RSS 物理内存 (MB)', type: 'line', smooth: true, showSymbol: false, yAxisIndex: 0, data: series.map((s) => Number((s.proc_mem_rss_kb / 1024).toFixed(2))), lineStyle: { color: '#34d399' } },
-        { name: '活跃 Tokio 任务', type: 'line', smooth: true, showSymbol: false, yAxisIndex: 1, data: series.map((s) => s.tokio_alive_tasks), lineStyle: { color: '#a78bfa' } },
+        { name: 'RSS 物理内存 (MB)', type: 'line', smooth: false, showSymbol: false, yAxisIndex: 0, data: series.map((s) => Number((s.proc_mem_rss_kb / 1024).toFixed(2))), itemStyle: { color: '#34d399' }, lineStyle: { color: '#34d399', width: 2 } },
+        { name: '活跃 Tokio 任务', type: 'line', smooth: false, showSymbol: false, yAxisIndex: 1, data: series.map((s) => s.tokio_alive_tasks), itemStyle: { color: '#a78bfa' }, lineStyle: { color: '#a78bfa', width: 2 } },
       ],
     };
   }, [series, range]);
 
+  const perfRanges: { key: '1h' | '24h' | '7d'; label: string }[] = [
+    { key: '1h', label: '最近 1 小时' },
+    { key: '24h', label: '最近 24 小时' },
+    { key: '7d', label: '最近 7 天' },
+  ];
+
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-lg font-bold text-slate-100">进程与运行时性能开销</h1>
-          <p className="text-xs text-slate-400">监控进程 CPU、RSS/VSZ 内存、文件描述符 FD 占用及 Tokio 异步运行时负载</p>
+          <p className="text-xs text-slate-400">实时监控进程 CPU、RSS/VSZ 内存、文件描述符 FD 占用及 Tokio 异步运行时负载</p>
         </div>
         <div className="flex rounded-lg border border-slate-700 bg-slate-900 p-0.5 text-xs">
-          {(['1h', '24h', '7d'] as const).map((r) => (
+          {perfRanges.map((r) => (
             <button
-              key={r}
-              onClick={() => setRange(r)}
-              className={`rounded-md px-3 py-1 font-medium ${range === r ? 'bg-cyan-500 text-slate-950' : 'text-slate-400'}`}
+              key={r.key}
+              onClick={() => setRange(r.key)}
+              className={`rounded-md px-3 py-1 font-medium transition ${range === r.key ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 hover:text-slate-200'}`}
             >
-              {r}
+              {r.label}
             </button>
           ))}
         </div>
@@ -1112,20 +1415,39 @@ function LogsView({ endpoints }: { endpoints: EndpointView[] }) {
   }, [levelFilter, epFilter, keyword]);
 
   useEffect(() => {
-    const ws = new WebSocket(createWsUrl('/ws/logs'));
-    ws.onmessage = (ev) => {
-      if (pausedRef.current) return;
-      try {
-        const entry: LogEntry = JSON.parse(ev.data);
-        setLogs((prev) => {
-          if (prev.some((x) => x.id === entry.id)) return prev;
-          return [...prev.slice(-999), entry];
-        });
-      } catch {
-        // ignore
-      }
+    let closed = false;
+    let ws: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = () => {
+      if (closed) return;
+      ws = new WebSocket(createWsUrl('/ws/logs'));
+      ws.onerror = () => ws?.close();
+      ws.onclose = () => {
+        if (!closed) {
+          retryTimer = setTimeout(connect, 2000);
+        }
+      };
+      ws.onmessage = (ev) => {
+        if (pausedRef.current) return;
+        try {
+          const entry: LogEntry = JSON.parse(ev.data);
+          setLogs((prev) => {
+            if (prev.some((x) => x.id === entry.id)) return prev;
+            return [...prev.slice(-999), entry];
+          });
+        } catch {
+          // ignore
+        }
+      };
     };
-    return () => ws.close();
+
+    connect();
+    return () => {
+      closed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      ws?.close();
+    };
   }, []);
 
   const visibleLogs = useMemo(() => {

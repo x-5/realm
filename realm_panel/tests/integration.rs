@@ -380,6 +380,18 @@ fn test_storage_7d_30d_and_snapshots() {
     assert_eq!(by_ep[0].endpoint_id, "ep-a");
     assert_eq!(by_ep[0].rx_bytes, 1400);
 
+    // Custom date-range query (from/to spanning 20 days ago to now)
+    let custom_series = storage
+        .query_traffic_series_between(now - 20 * 86400, now + 60, Some("ep-a"))
+        .unwrap();
+    let sum_custom_rx: u64 = custom_series.iter().map(|p| p.rx_bytes).sum();
+    assert_eq!(sum_custom_rx, 1400);
+    let custom_by_ep = storage
+        .query_traffic_by_endpoint_between(now - 20 * 86400, now + 60)
+        .unwrap();
+    assert_eq!(custom_by_ep.len(), 1);
+    assert_eq!(custom_by_ep[0].rx_bytes, 1400);
+
     let snap_id = storage.save_snapshot("test", "toml", "[[endpoints]]\n").unwrap();
     let snaps = storage.list_snapshots().unwrap();
     assert_eq!(snaps.len(), 1);
@@ -458,6 +470,8 @@ async fn test_probe_reachability_transitions() {
 
 #[tokio::test]
 async fn test_web_api_auth_crud_and_static_ui() {
+    use futures::StreamExt;
+
     let telemetry = shared_telemetry();
     let tmp = tempfile::tempdir().unwrap();
     let conf_path = tmp.path().join("realm.toml");
@@ -583,7 +597,7 @@ async fn test_web_api_auth_crud_and_static_ui() {
     // Wait for 1s metrics sampler to produce at least 1 snapshot
     tokio::time::sleep(Duration::from_millis(1200)).await;
 
-    // 5. Probe now, update, toggle, export, stats, devices, logs
+    // 5. Probe now, update, toggle, export, stats, custom date range, devices, logs
     let probe_res = http
         .post(format!("{base}/api/probes/{ep_id}/run"))
         .bearer_auth(&token)
@@ -604,9 +618,12 @@ async fn test_web_api_auth_crud_and_static_ui() {
     assert!(overview["latest"]["perf"]["sys_mem_total_kb"].as_u64().unwrap() > 0);
     assert_eq!(overview["latest"]["endpoints"].as_array().unwrap().len(), 1);
 
+    let now_ts = Utc::now().timestamp();
+    let custom_traffic_path = format!("/api/stats/traffic?from={}&to={}", now_ts - 86400, now_ts + 60);
     for path in [
         "/api/stats/traffic?range=7d",
         "/api/stats/traffic?range=30d",
+        custom_traffic_path.as_str(),
         "/api/stats/performance?range=1h",
         "/api/devices",
         "/api/probes",
@@ -621,6 +638,28 @@ async fn test_web_api_auth_crud_and_static_ui() {
             .unwrap();
         assert_eq!(resp.status(), 200, "GET {path} failed");
     }
+
+    // 6. WebSocket realtime & logs with URL-encoded (%3A) token (matching frontend encodeURIComponent)
+    let encoded_token = token.replace(':', "%3A");
+    let ws_realtime_url = format!("ws://{web_addr}/api/ws/realtime?token={encoded_token}");
+    let (mut ws_rt, _) = tokio_tungstenite::connect_async(&ws_realtime_url)
+        .await
+        .expect("ws realtime should upgrade with percent-encoded token");
+    let first_msg = tokio::time::timeout(Duration::from_secs(3), ws_rt.next())
+        .await
+        .expect("realtime ws timed out")
+        .expect("realtime ws closed")
+        .expect("realtime ws error");
+    let rt_json: serde_json::Value = serde_json::from_str(first_msg.to_text().unwrap()).unwrap();
+    assert_eq!(rt_json["type"], "realtime");
+    assert!(rt_json["snapshot"]["perf"]["sys_mem_total_kb"].as_u64().unwrap() > 0);
+    let _ = ws_rt.close(None).await;
+
+    let ws_logs_url = format!("ws://{web_addr}/api/ws/logs?token={encoded_token}");
+    let (mut ws_lg, _) = tokio_tungstenite::connect_async(&ws_logs_url)
+        .await
+        .expect("ws logs should upgrade with percent-encoded token");
+    let _ = ws_lg.close(None).await;
 
     let export_txt = reconciler.export_current_config(ConfigFormat::Toml).await.unwrap();
     assert!(export_txt.contains("[[endpoints]]"));

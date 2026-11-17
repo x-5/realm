@@ -440,6 +440,94 @@ impl Storage {
         Ok(rows)
     }
 
+    pub fn query_traffic_series_between(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        endpoint_id: Option<&str>,
+    ) -> Result<Vec<TrafficPoint>> {
+        let now = Utc::now().timestamp();
+        let span = (to_ts - from_ts).max(0);
+        let (table, col) = if span <= 7 * 86400 && from_ts >= now - 7 * 86400 {
+            ("traffic_1m", "ts_minute")
+        } else {
+            ("traffic_1h", "ts_hour")
+        };
+        let conn = self.conn.lock().unwrap();
+        if let Some(ep) = endpoint_id.filter(|s| !s.is_empty()) {
+            let sql = format!(
+                "SELECT {col}, rx_bytes, tx_bytes, peak_rx_bps, peak_tx_bps, active_conns_max, errors
+                 FROM {table} WHERE {col} >= ?1 AND {col} <= ?2 AND endpoint_id = ?3 ORDER BY {col} ASC"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![from_ts, to_ts, ep], |r| {
+                    Ok(TrafficPoint {
+                        ts: r.get(0)?,
+                        rx_bytes: r.get::<_, i64>(1)? as u64,
+                        tx_bytes: r.get::<_, i64>(2)? as u64,
+                        peak_rx_bps: r.get::<_, i64>(3)? as u64,
+                        peak_tx_bps: r.get::<_, i64>(4)? as u64,
+                        active_conns_max: r.get::<_, i64>(5)? as u64,
+                        errors: r.get::<_, i64>(6)? as u64,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        } else {
+            let sql = format!(
+                "SELECT {col}, SUM(rx_bytes), SUM(tx_bytes), MAX(peak_rx_bps), MAX(peak_tx_bps), SUM(active_conns_max), SUM(errors)
+                 FROM {table} WHERE {col} >= ?1 AND {col} <= ?2 GROUP BY {col} ORDER BY {col} ASC"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![from_ts, to_ts], |r| {
+                    Ok(TrafficPoint {
+                        ts: r.get(0)?,
+                        rx_bytes: r.get::<_, i64>(1)? as u64,
+                        tx_bytes: r.get::<_, i64>(2)? as u64,
+                        peak_rx_bps: r.get::<_, i64>(3)? as u64,
+                        peak_tx_bps: r.get::<_, i64>(4)? as u64,
+                        active_conns_max: r.get::<_, i64>(5)? as u64,
+                        errors: r.get::<_, i64>(6)? as u64,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }
+    }
+
+    pub fn query_traffic_by_endpoint_between(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+    ) -> Result<Vec<EndpointTrafficSummary>> {
+        let now = Utc::now().timestamp();
+        let span = (to_ts - from_ts).max(0);
+        let (table, col) = if span <= 7 * 86400 && from_ts >= now - 7 * 86400 {
+            ("traffic_1m", "ts_minute")
+        } else {
+            ("traffic_1h", "ts_hour")
+        };
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT endpoint_id, SUM(rx_bytes), SUM(tx_bytes)
+             FROM {table} WHERE {col} >= ?1 AND {col} <= ?2
+             GROUP BY endpoint_id ORDER BY (SUM(rx_bytes)+SUM(tx_bytes)) DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![from_ts, to_ts], |r| {
+                Ok(EndpointTrafficSummary {
+                    endpoint_id: r.get(0)?,
+                    rx_bytes: r.get::<_, i64>(1)? as u64,
+                    tx_bytes: r.get::<_, i64>(2)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn insert_perf_sample(&self, s: &PerfSample) -> Result<()> {
         let ts_minute = s.ts - s.ts.rem_euclid(60);
         let conn = self.conn.lock().unwrap();
@@ -611,11 +699,11 @@ impl Storage {
     pub fn cleanup_retention(&self) -> Result<()> {
         let now = Utc::now().timestamp();
         let cutoff_7d = now - 7 * 86400;
-        let cutoff_35d = now - 35 * 86400;
+        let cutoff_365d = now - 365 * 86400;
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM traffic_1m WHERE ts_minute < ?1", params![cutoff_7d])?;
-        conn.execute("DELETE FROM traffic_1h WHERE ts_hour < ?1", params![cutoff_35d])?;
-        conn.execute("DELETE FROM perf_samples WHERE ts_minute < ?1", params![cutoff_35d])?;
+        conn.execute("DELETE FROM traffic_1h WHERE ts_hour < ?1", params![cutoff_365d])?;
+        conn.execute("DELETE FROM perf_samples WHERE ts_minute < ?1", params![cutoff_365d])?;
         conn.execute("DELETE FROM probe_results WHERE ts < ?1", params![cutoff_7d])?;
         Ok(())
     }

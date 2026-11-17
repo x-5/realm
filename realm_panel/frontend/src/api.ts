@@ -102,12 +102,22 @@ export const api = {
       probes: TargetProbeStatus[];
     }>('/stats/overview'),
 
-  statsTraffic: (range: string, endpointId?: string) => {
-    const params = new URLSearchParams({ range });
-    if (endpointId) params.set('endpoint_id', endpointId);
+  statsTraffic: (opts: {
+    range?: string;
+    from?: number;
+    to?: number;
+    endpointId?: string;
+  }) => {
+    const params = new URLSearchParams();
+    if (opts.range) params.set('range', opts.range);
+    if (opts.from != null) params.set('from', String(opts.from));
+    if (opts.to != null) params.set('to', String(opts.to));
+    if (opts.endpointId) params.set('endpoint_id', opts.endpointId);
     return request<{
       range: string;
       unit: 'bps' | 'bytes';
+      from?: number;
+      to?: number;
       series: TrafficPoint[];
       by_endpoint: EndpointTrafficSummary[];
     }>(`/stats/traffic?${params.toString()}`);

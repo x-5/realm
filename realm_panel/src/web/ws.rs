@@ -31,24 +31,42 @@ async fn handle_realtime_ws(mut socket: WebSocket, state: Arc<AppState>) {
     }
 
     let mut rx = state.metrics.subscribe();
+    let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(25));
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
-        match rx.recv().await {
-            Ok(snap) => {
-                let payload = serde_json::json!({
-                    "type": "realtime",
-                    "snapshot": snap,
-                    "probes": state.probes.list_latest(),
-                });
-                if socket
-                    .send(Message::Text(payload.to_string().into()))
-                    .await
-                    .is_err()
-                {
+        tokio::select! {
+            res = rx.recv() => {
+                match res {
+                    Ok(snap) => {
+                        let payload = serde_json::json!({
+                            "type": "realtime",
+                            "snapshot": snap,
+                            "probes": state.probes.list_latest(),
+                        });
+                        if socket
+                            .send(Message::Text(payload.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+            _ = ping_interval.tick() => {
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
                     break;
                 }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(_) => break,
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(_)) => {}
+                }
+            }
         }
     }
 }
@@ -84,26 +102,43 @@ async fn handle_logs_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsL
 
     let mut rx = state.telemetry.subscribe();
     let min_rank = params.level.as_deref().map(rank).unwrap_or(0);
+    let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(25));
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        match rx.recv().await {
-            Ok(entry) => {
-                if rank(&entry.level) < min_rank {
-                    continue;
-                }
-                if let Some(ref ep) = params.endpoint_id {
-                    if !ep.is_empty() && entry.endpoint_id.as_deref() != Some(ep.as_str()) {
-                        continue;
+        tokio::select! {
+            res = rx.recv() => {
+                match res {
+                    Ok(entry) => {
+                        if rank(&entry.level) < min_rank {
+                            continue;
+                        }
+                        if let Some(ref ep) = params.endpoint_id {
+                            if !ep.is_empty() && entry.endpoint_id.as_deref() != Some(ep.as_str()) {
+                                continue;
+                            }
+                        }
+                        if let Ok(txt) = serde_json::to_string(&entry) {
+                            if socket.send(Message::Text(txt.into())).await.is_err() {
+                                break;
+                            }
+                        }
                     }
-                }
-                if let Ok(txt) = serde_json::to_string(&entry) {
-                    if socket.send(Message::Text(txt.into())).await.is_err() {
-                        break;
-                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
                 }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(_) => break,
+            _ = ping_interval.tick() => {
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(_)) => {}
+                }
+            }
         }
     }
 }

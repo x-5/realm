@@ -134,7 +134,7 @@ pub async fn require_auth(
     let token_from_query = req.uri().query().and_then(|q| {
         q.split('&')
             .find_map(|pair| pair.strip_prefix("token="))
-            .map(ToString::to_string)
+            .map(percent_decode)
     });
 
     let token = token_from_header.or(token_from_query);
@@ -148,4 +148,31 @@ pub async fn require_auth(
 
     req.extensions_mut().insert(username);
     Ok(next.run(req).await)
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }

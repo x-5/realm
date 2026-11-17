@@ -320,12 +320,42 @@ pub async fn stats_overview(State(state): State<Arc<AppState>>) -> Json<serde_js
 pub struct TrafficQuery {
     pub range: Option<String>,
     pub endpoint_id: Option<String>,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
 }
 
 pub async fn stats_traffic(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TrafficQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if q.from.is_some() || q.to.is_some() {
+        let now = chrono::Utc::now().timestamp();
+        let from_ts = q.from.unwrap_or(now - 7 * 86400);
+        let to_ts = q.to.unwrap_or(now);
+        if from_ts > to_ts {
+            return Err(err_resp(
+                StatusCode::BAD_REQUEST,
+                "invalid time range: 'from' must be <= 'to'",
+            ));
+        }
+        let series = state
+            .storage
+            .query_traffic_series_between(from_ts, to_ts, q.endpoint_id.as_deref())
+            .map_err(|e| err_resp(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let summary = state
+            .storage
+            .query_traffic_by_endpoint_between(from_ts, to_ts)
+            .map_err(|e| err_resp(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        return Ok(Json(serde_json::json!({
+            "range": "custom",
+            "unit": "bytes",
+            "from": from_ts,
+            "to": to_ts,
+            "series": series,
+            "by_endpoint": summary,
+        })));
+    }
+
     let range = q.range.as_deref().unwrap_or("24h");
     if range == "1h" {
         let recent = state.metrics.recent_series(3600);
